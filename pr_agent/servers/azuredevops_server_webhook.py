@@ -336,6 +336,10 @@ async def handle_request_azure(data, log_context):
         log_context["api_url"] = pr_url
         async with push_trigger_slot(pr_url, allow_backlog=True, ttl=300) as proceed:
             if proceed:
+                # The provider cached before the slot wait holds the PR revision of that moment, and a push
+                # refused while this run waited is only covered if the run reads the current revision.
+                if context.exists():
+                    context.get("git_provider", {}).pop(pr_url, None)
                 await _perform_commands_azure("push_commands", PRAgent(), pr_url, log_context)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,

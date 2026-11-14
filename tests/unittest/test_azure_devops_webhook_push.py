@@ -1,9 +1,11 @@
+import asyncio
 import copy
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+from starlette_context import context, request_cycle_context
 
 from pr_agent.config_loader import global_settings
 from pr_agent.servers import azuredevops_server_webhook as webhook
@@ -263,6 +265,46 @@ async def test_updated_event_uses_existing_web_link_precedence(updated_event, ru
     runtime.agent.handle_request.assert_awaited_once_with(
         href.replace("_apis/git/repositories", "_git"), ["/review"]
     )
+
+
+async def test_waiting_push_reviews_revision_of_push_refused_during_wait(updated_event, runtime):
+    # A runs, B waits for the slot, C is refused: B's run is the only one left to cover C's commits.
+    current = {"revision": "A"}
+    reviewed = []
+    a_started = asyncio.Event()
+    release_a = asyncio.Event()
+
+    def cache_provider(url):
+        # Mirror apply_repo_settings: reuse the request's cached provider or build one at the current revision.
+        providers = context.setdefault("git_provider", {})
+        if url not in providers:
+            providers[url] = SimpleNamespace(revision=current["revision"])
+
+    async def handle_request(url, command):
+        reviewed.append(context["git_provider"][url].revision)
+        if len(reviewed) == 1:
+            a_started.set()
+            await release_a.wait()
+
+    runtime.repo_settings.side_effect = cache_provider
+    runtime.agent.handle_request.side_effect = handle_request
+
+    async def deliver():
+        with request_cycle_context({}):
+            await webhook.handle_request_azure(copy.deepcopy(updated_event), {})
+
+    task_a = asyncio.create_task(deliver())
+    await a_started.wait()
+    current["revision"] = "B"
+    task_b = asyncio.create_task(deliver())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    current["revision"] = "C"
+    await deliver()
+    release_a.set()
+    await asyncio.gather(task_a, task_b)
+
+    assert reviewed == ["A", "C"]
 
 
 async def test_push_slot_refusal_does_not_run_commands(updated_event, runtime, monkeypatch):
