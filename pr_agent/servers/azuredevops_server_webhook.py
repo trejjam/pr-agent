@@ -21,6 +21,7 @@ from starlette_context.middleware import RawContextMiddleware
 
 from pr_agent.agent.pr_agent import PRAgent, command2class, prepare_command
 from pr_agent.agent.request_policy import RequestOutcome
+from pr_agent.algo.setting_utils import _as_bool_setting, normalize_setting_list
 from pr_agent.algo.utils import encode_user_text_arg
 from pr_agent.config_loader import get_settings, global_settings
 from pr_agent.git_providers import get_git_provider_with_context
@@ -28,7 +29,13 @@ from pr_agent.git_providers.azuredevops_provider import AZURE_AGENT_RESPONSE_MAR
 from pr_agent.git_providers.utils import apply_repo_settings
 from pr_agent.log import LoggingFormat, get_logger, setup_logger
 from pr_agent.servers.request_body_limit import create_server_app
-from pr_agent.servers.utils import auto_feedback_disabled, basic_auth_matches, dedupe_review_commands, get_pr_commands
+from pr_agent.servers.utils import (
+    auto_feedback_disabled,
+    basic_auth_matches,
+    dedupe_review_commands,
+    get_pr_commands,
+    push_trigger_slot,
+)
 from pr_agent.telemetry.prometheus import attach_metrics_endpoint, prometheus_metrics_enabled
 
 setup_logger(fmt=LoggingFormat.JSON, level=get_settings().get("CONFIG.LOG_LEVEL", "INFO"))
@@ -219,7 +226,7 @@ async def _perform_commands_azure(commands_conf: str, agent: PRAgent, api_url: s
     commands = (
         get_pr_commands("azure_devops_server")
         if commands_conf == "pr_commands"
-        else get_settings().get(f"azure_devops_server.{commands_conf}")
+        else normalize_setting_list(get_settings().get(f"azure_devops_server.{commands_conf}"))
     )
     if commands:
         commands = dedupe_review_commands(commands)
@@ -292,6 +299,44 @@ async def handle_request_azure(data, log_context):
         log_context["event"] = data["eventType"]
         log_context["api_url"] = pr_url
         await _perform_commands_azure("pr_commands", PRAgent(), pr_url, log_context)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=jsonable_encoder({"message": "webhook triggered successfully"})
+        )
+    elif data["eventType"] == "git.pullrequest.updated":
+        resource = data.get("resource")
+        message = data.get("message")
+        if (data.get("resourceVersion") not in ("1.0", "2.0")
+                or not isinstance(resource, dict) or resource.get("status") != "active"
+                or _as_bool_setting(resource.get("isDraft", False), default=True)
+                or not isinstance(message, dict) or not isinstance(message.get("text"), str)):
+            return
+        # Empirical English summary heuristic, not a documented stable payload discriminator.
+        # Commit fields also occur on non-push updates; never inspect detailedMessage or the PR body.
+        summary = message["text"].splitlines()
+        if not summary:
+            return
+        actor, separator, identity = summary[0].casefold().partition(" updated the source branch of pull request ")
+        pr_id = resource.get("pullRequestId")
+        if (not actor.strip() or not separator or "pull request " in actor
+                or type(pr_id) is not int or pr_id <= 0 or not identity.startswith(f"{pr_id} (")):
+            return
+        try:
+            pr_url = _created_event_pr_url(data)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pr_url = None
+        if pr_url is None:
+            get_logger().warning("Ignoring Azure updated event with invalid pull request identity")
+            return
+        apply_repo_settings(pr_url)
+        if (not _as_bool_setting(get_settings().get("azure_devops_server.handle_push_trigger", False))
+                or not normalize_setting_list(get_settings().get("azure_devops_server.push_commands", []))):
+            return
+        log_context["event"] = data["eventType"]
+        log_context["api_url"] = pr_url
+        async with push_trigger_slot(pr_url, allow_backlog=True, ttl=300) as proceed:
+            if proceed:
+                await _perform_commands_azure("push_commands", PRAgent(), pr_url, log_context)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=jsonable_encoder({"message": "webhook triggered successfully"})
