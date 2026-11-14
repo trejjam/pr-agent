@@ -122,6 +122,54 @@ To trigger from an Azure webhook, you need to manually
 Use the "Pull request created" type to trigger a review, or "Pull request commented on" to trigger a supported
 `/<command> <args>` comment. API v2.0 is required for comment events.
 
+Creation events run `azure_devops_server.pr_commands`, or the shared automatic-command profile when that setting is absent.
+
+### Automatic commands after a source push
+
+Add a "Pull request updated" service hook to deliver `git.pullrequest.updated` events to the same webhook endpoint.
+Select "Source branch updated" as the notification filter when possible.
+An existing unfiltered subscription also works; the server filters the delivered events.
+
+Enable the trigger in the server configuration or the repository's `.pr_agent.toml`:
+
+```toml
+[azure_devops_server]
+handle_push_trigger = true
+push_commands = ["/review"]
+```
+
+The defaults are `handle_push_trigger = false` and `push_commands = ["/review"]`.
+To run both description and review commands, set `push_commands = ["/describe", "/review"]`.
+For environment-based configuration, use:
+
+```bash
+export azure_devops_server__handle_push_trigger=true
+export azure_devops_server__push_commands='["/describe", "/review"]'
+```
+
+Push commands respect repository settings and `config.disable_auto_feedback`.
+They run only for active, non-draft pull requests. Creation and comment commands are unchanged.
+
+The server recognizes source pushes from the first line of the English event summary in `message.text`.
+It matches "updated the source branch of pull request" followed by the event's pull request ID.
+This detection applies to resource versions 1.0 and 2.0; other versions and missing or unrecognized summaries are ignored.
+The wording is a compatibility heuristic, not a structured API guarantee.
+Keep event messages enabled in the webhook's "Messages to send" setting.
+Localized or changed wording can prevent a push from triggering commands, even with the source-update subscription filter.
+
+Microsoft's [event reference](https://learn.microsoft.com/en-us/azure/devops/service-hooks/events?view=azure-devops#pull-request-updated)
+documents `PushNotification` as a subscription filter, not a field in the delivered payload.
+Its non-push example also contains `commits` and `lastMergeSourceCommit`, so their presence cannot identify a source push.
+The English wording appears in a public [resource-version 1.0 payload fixture](https://github.com/zulip/zulip/blob/main/zerver/webhooks/azuredevops/fixtures/code_pull_request__updated.json).
+The same matcher accepts version 2.0 payloads, but Microsoft does not document a stable message template for either version.
+Title edits, reviewer changes, votes, and status updates do not trigger push commands.
+
+Concurrent push commands use the shared per-PR queue within each server process.
+This does not suppress later webhook redeliveries or coordinate multiple server processes.
+Azure DevOps does not support the GitHub-only `push_trigger_ignore_merge_commits` guard; source pushes that merge the target branch can trigger commands.
+
+### Comment questions and authentication
+
 Questions can also address the agent without a slash command. Mention the Azure DevOps identity used by PR-Agent at
 the start of a PR or line comment. PR-Agent discovers that identity from its earlier comments, answers in the same
 thread, and uses the existing thread discussion as context. Generic phrases such as `hi agent` do not trigger a

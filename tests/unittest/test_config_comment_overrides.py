@@ -30,6 +30,9 @@ COMMENT_OVERRIDABLE_KEYS = {
     "azure_devops": frozenset({
         "default_comment_status",
     }),
+    "azure_devops_server": frozenset({
+        "handle_push_trigger", "push_commands",
+    }),
     "bitbucket": frozenset({
         "identity_request_timeout",
     }),

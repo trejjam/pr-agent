@@ -697,6 +697,8 @@ See [Azure DevOps Server](../usage-guide/automations_and_usage.md#azure-devops-w
 | Key | Default | Description |
 | --- | --- | --- |
 | `agent_identity` | "" | Host-only GUID, unique name, descriptor, or list; empty resolves review authorship automatically. See installation/azure.md |
+| `handle_push_trigger` | false | Enable English source-branch update summary recognition (true/false). See installation/azure.md |
+| `push_commands` | ["/review"] | Commands for recognized source-branch updates; list or single command string. See installation/azure.md |
 
 
 ## `[push_outputs]` — push command outputs to external sinks without calling git-provider APIs (disabled by default) {#push_outputs-push command outputs to external sinks without calling git-provider APIs (disabled by default)}
